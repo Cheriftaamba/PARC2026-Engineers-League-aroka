@@ -1,0 +1,72 @@
+<!--
+  PARC 2026 - navigate_to_pose tree, no wipe of the GLOBAL costmap.
+
+  The global costmap is the memory of the run (LiDAR evidence map + touch marks),
+  so no recovery clears it.
+
+  Recovery policy for a robot that carries a 0.69 m chassis under tabletops the
+  LiDAR cannot see:
+
+    * BACK OFF FIRST. Backing away from the obstacle is the only motion that is
+      safe next to a table. BackUp is collision-checked on the local costmap
+      along the reverse path.
+    * WAIT ~1.5 s after backing off. evidence_map publishes every 0.5 s and the
+      global costmap updates at 1 Hz, so this is how long the touch mark needs to
+      reach the planner. A replan before that returns the same route.
+    * NEVER clear the local costmap while the robot is against something: the
+      LiDAR is blind inside 0.45 m (scan_filter), so what it forgets it cannot
+      re-learn. It is only cleared after a first backoff.
+    * SPIN LAST and short. A 90 deg pirouette next to a table sweeps the
+      circumscribed radius (0.35 m) of the chassis through the overhang.
+-->
+<root BTCPP_format="4" main_tree_to_execute="MainTree">
+  <BehaviorTree ID="MainTree">
+    <RecoveryNode number_of_retries="6" name="NavigateRecovery">
+      <PipelineSequence name="NavigateWithReplanning">
+        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+        <RateController hz="1.0">
+          <RecoveryNode number_of_retries="1" name="ComputePathToPose">
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+            <Sequence>
+              <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+              <Wait wait_duration="1.0"/>
+            </Sequence>
+          </RecoveryNode>
+        </RateController>
+        <RecoveryNode number_of_retries="1" name="FollowPath">
+          <FollowPath path="{path}" controller_id="{selected_controller}" error_code_id="{follow_path_error_code}"/>
+          <Sequence>
+            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+            <BackUp backup_dist="0.35" backup_speed="0.12" error_code_id="{backup_code_id}"/>
+            <Wait wait_duration="1.5"/>
+          </Sequence>
+        </RecoveryNode>
+      </PipelineSequence>
+      <Sequence>
+        <Fallback>
+          <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+          <WouldAPlannerRecoveryHelp error_code="{compute_path_error_code}"/>
+        </Fallback>
+        <ReactiveFallback name="RecoveryFallback">
+          <GoalUpdated/>
+          <RoundRobin name="RecoveryActions">
+            <Sequence name="BackOffAndWait">
+              <BackUp backup_dist="0.35" backup_speed="0.12" error_code_id="{backup_code_id}"/>
+              <Wait wait_duration="1.5"/>
+            </Sequence>
+            <Sequence name="ClearLocalAfterBackoff">
+              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+              <Wait wait_duration="1.0"/>
+            </Sequence>
+            <Sequence name="BackOffFurther">
+              <BackUp backup_dist="0.50" backup_speed="0.12" error_code_id="{backup_code_id}"/>
+              <Wait wait_duration="1.5"/>
+            </Sequence>
+            <Spin spin_dist="0.80" error_code_id="{spin_error_code}"/>
+          </RoundRobin>
+        </ReactiveFallback>
+      </Sequence>
+    </RecoveryNode>
+  </BehaviorTree>
+</root>

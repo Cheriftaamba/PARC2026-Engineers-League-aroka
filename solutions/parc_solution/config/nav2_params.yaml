@@ -1,0 +1,675 @@
+amcl:
+  ros__parameters:
+    alpha1: 0.2
+    alpha2: 0.2
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+    base_frame_id: "base_footprint"
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+    do_beamskip: false
+    global_frame_id: "map"
+    lambda_short: 0.1
+    laser_likelihood_max_dist: 2.0
+    laser_max_range: 100.0
+    laser_min_range: -1.0
+    laser_model_type: "likelihood_field"
+    max_beams: 60
+    max_particles: 2000
+    min_particles: 500
+    odom_frame_id: "odom"
+    pf_err: 0.05
+    pf_z: 0.99
+    recovery_alpha_fast: 0.0
+    recovery_alpha_slow: 0.0
+    resample_interval: 1
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+    save_pose_rate: 0.5
+    sigma_hit: 0.2
+    tf_broadcast: true
+    transform_tolerance: 1.0
+    update_min_a: 0.2
+    update_min_d: 0.25
+    z_hit: 0.5
+    z_max: 0.05
+    z_rand: 0.5
+    z_short: 0.05
+    scan_topic: scan
+
+bt_navigator:
+  ros__parameters:
+    global_frame: map
+    # base_footprint, NOT Nav2's default base_link. sitoe_core.xacro joins the two
+    # with rpy="0 0 pi/2", and the DiffDrive plugin drives in base_footprint - so
+    # base_footprint's +x is the forward direction while base_link's +x points
+    # sideways. Left on base_link, MPPI's differential-drive model reasons in a
+    # frame rotated 90 degrees from the actual motion, the costmap footprint is
+    # mis-oriented, and Nav2 disagrees with slam_toolbox (which already uses
+    # base_footprint). That mismatch alone produced most of the erratic driving.
+    robot_base_frame: base_footprint
+    odom_topic: /odom
+    bt_loop_duration: 10
+    default_server_timeout: 20
+    wait_for_service_timeout: 1000
+    action_server_result_timeout: 900.0
+    navigators: ["navigate_to_pose", "navigate_through_poses"]
+    navigate_to_pose:
+      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+    navigate_through_poses:
+      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+    # 'default_nav_through_poses_bt_xml' and 'default_nav_to_pose_bt_xml' are use defaults:
+    # nav2_bt_navigator/navigate_to_pose_w_replanning_and_recovery.xml
+    # nav2_bt_navigator/navigate_through_poses_w_replanning_and_recovery.xml
+    # They can be set here or via a RewrittenYaml remap from a parent launch file to Nav2.
+
+    # plugin_lib_names is used to add custom BT plugins to the executor (vector of strings).
+    # Built-in plugins are added automatically
+    # plugin_lib_names: []
+
+    # Our own tree: the stock one wipes the global costmap on every recovery,
+    # which destroys the tabletop knowledge only the depth camera can provide.
+    # See the XML header for the measurements.
+    default_nav_to_pose_bt_xml: "BT_XML_PATH"
+
+    error_code_names:
+      - compute_path_error_code
+      - follow_path_error_code
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    costmap_update_timeout: 0.30
+    min_x_velocity_threshold: 0.001
+    min_y_velocity_threshold: 0.5
+    min_theta_velocity_threshold: 0.001
+    failure_tolerance: 0.3
+    progress_checker_plugins: ["progress_checker"]
+    goal_checker_plugins: ["general_goal_checker"] # "precise_goal_checker"
+    controller_plugins: ["FollowPath"]
+    use_realtime_priority: false
+    # speed_governor.py publishes here. Nav2's own interface for a variable speed
+    # ceiling (the one a costmap SpeedFilter would use), applied by MPPI through
+    # setSpeedLimit: the ceiling below can therefore be set for open floor instead of
+    # for the worst two metres of the route. See speed_governor.py.
+    speed_limit_topic: "/parc/speed_limit"
+
+    # Progress checker parameters
+    progress_checker:
+      plugin: "nav2_controller::SimpleProgressChecker"
+      required_movement_radius: 0.5
+      movement_time_allowance: 10.0
+    # Goal checker parameters
+    #precise_goal_checker:
+    #  plugin: "nav2_controller::SimpleGoalChecker"
+    #  xy_goal_tolerance: 0.25
+    #  yaw_goal_tolerance: 0.25
+    #  stateful: True
+    general_goal_checker:
+      stateful: True
+      plugin: "nav2_controller::SimpleGoalChecker"
+      xy_goal_tolerance: 0.25
+      yaw_goal_tolerance: 0.25
+    FollowPath:
+      # RegulatedPurePursuit, NOT MPPI, and the reason is a measurement.
+      #
+      # MPPI is the better controller on paper and it is what this solution used
+      # first. On a clear path, with no collision-monitor intervention and commands
+      # flowing at a healthy 20 Hz, it commanded a mean forward velocity of
+      # 0.047 m/s against a ceiling of 0.36 - the robot crept. At that speed the
+      # 10 m traverse needs ~210 s of pure driving and the 600 s budget is at risk;
+      # worse, the execution time is one of the three scored criteria.
+      #
+      # MPPI optimises a trajectory afresh every cycle, and this world runs at
+      # RTF 0.073: the controller spins in wall time far faster than simulated time
+      # advances ("Control loop missed its desired rate of 20.0000 Hz. Current loop
+      # rate is inf Hz" throughout the logs), so each cycle executes a sliver of its
+      # plan before being replaced by the next one and the velocity ramp never
+      # builds.
+      #
+      # Regulated Pure Pursuit computes its command geometrically from the path
+      # instead of searching for it: it is immune to that timing pathology, costs a
+      # fraction of the CPU (which this machine has none of to spare), and its
+      # regulation rules - slow into curves, slow near obstacles - encode exactly
+      # the caution the Sito-E needs, a robot whose 7.5 kg upper chassis at z=0.69
+      # over a 0.17 m half-track has already been measured tipping fully over.
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.36
+      # Short lookahead: the controller must HUG the planned path, not smooth it.
+      #
+      # The planner routes around cafe_table_6 correctly - the overhang halo in the
+      # global costmap sees to that - but pure pursuit with a 0.6-0.9 m carrot cuts the
+      # corner, and the corner it cut put the 0.69 m chassis under a 0.755 m tabletop.
+      # Measured three runs running: `cafe_table_6::link::surface`. Halving the carrot
+      # costs a little smoothness and buys the clearance the plan already contained.
+      lookahead_dist: 0.35
+      min_lookahead_dist: 0.25
+      max_lookahead_dist: 0.50
+      lookahead_time: 1.5
+      # Scale the lookahead with speed: short and responsive between the tables,
+      # long and smooth on open floor.
+      use_velocity_scaled_lookahead_dist: true
+
+      # Turn on the spot rather than arc when the path leaves at a sharp angle. The
+      # first move of the run is exactly that: the route starts ~100 deg off the
+      # spawn heading.
+      use_rotate_to_heading: true
+      rotate_to_heading_min_angle: 0.60
+      rotate_to_heading_angular_vel: 0.70
+      max_angular_accel: 2.0
+
+      # Regulated scaling: below this turning radius the speed is cut, which keeps
+      # the top-heavy chassis from leaning into corners.
+      use_regulated_linear_velocity_scaling: true
+      regulated_linear_scaling_min_radius: 0.60
+      regulated_linear_scaling_min_speed: 0.15
+      # And cut it again when costmap cost rises, i.e. when passing close to
+      # furniture. This is the same intent as speed_governor.py, one layer down:
+      # the governor reacts to the raw scan before the costmap has updated, this
+      # reacts to the inflation field the planner reasoned about.
+      use_cost_regulated_linear_velocity_scaling: true
+      cost_scaling_dist: 0.60
+      cost_scaling_gain: 1.0
+      inflation_cost_scaling_factor: 2.0
+
+      # Arrival: ease off over the last 0.6 m instead of stopping dead.
+      min_approach_linear_velocity: 0.10
+      approach_velocity_scaling_dist: 0.60
+
+      # Refuse a command that would hit something within a second of driving. The
+      # collision monitor is the last line; this is the controller's own.
+      use_collision_detection: true
+      max_allowed_time_to_collision_up_to_carrot: 1.0
+
+      allow_reversing: false
+      transform_tolerance: 0.2
+      max_robot_pose_search_dist: 10.0
+
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_footprint
+      rolling_window: true
+      width: 5
+      height: 5
+      resolution: 0.05
+      # Real footprint (0.4437 x 0.4858 m from the URDF) plus ~2 cm margin, instead
+      # of robot_radius. A circular model forces inscribed = circumscribed = 0.35,
+      # which marks every cell within 35 cm of furniture as INSCRIBED - NavFn then
+      # refuses to plan, including out of the robot's own cell. The polygon gives
+      # the true inscribed radius (0.24) and circumscribed radius (0.35) separately.
+      footprint: "[[0.24, 0.26], [0.24, -0.26], [-0.24, -0.26], [-0.24, 0.26]]"
+      # No static layer here, and that was tested rather than assumed. Feeding this
+      # costmap the evidence map (halo included) boxed the robot in: 13 recoveries and
+      # a plan that grew to 19.78 m while the robot drifted AWAY from the goal. A 5 x 5
+      # rolling window filled with a whole restaurant's worth of lethal cells leaves the
+      # controller nowhere to go. The halo belongs in the global costmap, where it
+      # shapes the route; here the controller needs the live LiDAR and room to manoeuvre.
+      plugins: ["voxel_layer", "inflation_layer"]
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # Tighter than the global costmap's halo, on purpose. This is the map the
+        # controller checks for collisions, and a 0.60 m halo around each of two tables
+        # 2.5 m apart leaves the middle of the gap looking expensive from both sides at
+        # once - which is how the robot came to refuse a passage it fits through four
+        # times over. 0.45 m still keeps the 0.24 m inscribed footprint well clear.
+        cost_scaling_factor: 2.0
+        inflation_radius: 0.45
+      voxel_layer:
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: True
+        # Clear whatever lands inside the robot's own footprint, every cycle.
+        #
+        # This is not a precaution, it is the fix for the failure that stalled the run
+        # 4.7 m from the goal. Measured at that moment: of 1550 lethal cells in the
+        # local costmap, 1006 were NOT confirmed by the LiDAR evidence map - and the
+        # nearest of those phantom cells sat 0.12 m from the robot's centre, i.e.
+        # INSIDE its own footprint. Regulated Pure Pursuit's collision check therefore
+        # found the robot in collision wherever it stood, FollowPath failed, the
+        # behaviour tree span ("Collision Ahead - Exiting Spin"), and the loop repeated
+        # for the rest of the run.
+        #
+        # The LiDAR's version of this problem was already known and fixed upstream by
+        # scan_filter.py; the depth camera has exactly the same one and nothing was
+        # filtering it. Nav2 leaves this false by default on the VoxelLayer.
+        footprint_clearing_enabled: True
+        origin_z: 0.0
+        # 0.1 m x 16 voxels spans 0..1.6 m, so a 0.755 m tabletop has somewhere to
+        # live. At the default 0.05 the column topped out at 0.8 m, right on it.
+        z_resolution: 0.1
+        z_voxels: 16
+        max_obstacle_height: 2.0
+        mark_threshold: 0
+        # LiDAR ONLY here too, and this was the change that finally let the robot
+        # through. Measured while it sat stuck 4.7 m from the goal, unable to get round
+        # the last table: of 1981 lethal cells in this costmap, 1185 (60 %) matched no
+        # obstacle in the LiDAR evidence map, and the nearest of those phantoms was
+        # 0.10 m from the robot's own centre - inside its footprint, so the controller
+        # believed itself in collision wherever it stood. `footprint_clearing_enabled`
+        # and an `obstacle_min_range` of 0.45 m both failed to remove them, because the
+        # camera re-marks the same cells on the very next frame.
+        #
+        # What is lost: tabletops are invisible to a 6 cm LiDAR, so the costmaps no
+        # longer see the overhang of a cafe_table. What replaces it: the evidence map's
+        # morphological closing enlarges each pedestal, the 0.45 m inflation keeps the
+        # robot's centre away from it, and the collision monitor still brakes on the
+        # LiDAR. Imperfect - but a camera that stops the robot from moving at all is
+        # not protection.
+        observation_sources: scan
+        scan:
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 3.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 2.5
+          obstacle_min_range: 0.0
+        # The LiDAR alone cannot do this job. It sits ~4 cm off the floor, so of a
+        # cafe table it sees only the 4.2 cm pedestal - while the tabletop it must
+        # actually avoid is 0.913 m wide at z = 0.735..0.775 m. The planner happily
+        # routed "past the pedestal" and the robot's tall chassis drove into the
+        # overhanging top, which is exactly how runs ended wedged against a table
+        # (collision reported against `cafe_table_1::link::surface`).
+        #
+        # Measured in base_footprint, the top camera puts 5067 points in the
+        # 0.6-0.8 m band ahead of the robot; the bottom camera puts none above
+        # 0.4 m. So the top camera is the sensor for this, and it was unused.
+        pointcloud:
+          topic: /top_camera_depth/points
+          data_type: "PointCloud2"
+          marking: True
+          # Clearing ON. It was disabled for a while on the theory that the camera
+          # was erasing its own tabletop marks as it turned; the real culprit was
+          # the behaviour tree wiping the entire costmap on every recovery (see
+          # behavior_trees/). With that fixed, clearing is both safe and necessary:
+          # without it the restaurant's moving visitors leave permanent phantom
+          # obstacles, blocking cells climbed past 76000 of 360000, and the robot
+          # walled itself in. The VoxelLayer keeps the LiDAR from erasing tabletops.
+          clearing: True
+          # Height window, measured on the actual cloud rather than guessed. One frame
+          # in base_footprint, sampled every 37th point, contained:
+          #
+          #   z < 0.05 m        630 points  (the FLOOR, at 1.2-3.7 m - the camera does
+          #                                  see it, contrary to the old assumption)
+          #   0.30-0.45 m       267 points  (neither floor nor tabletop: chair seats,
+          #                                  visitors' legs, depth noise)
+          #   0.70-0.90 m       640 points  (the tabletops - the thing only this sensor
+          #                                  can see, at 0.735-0.775 m)
+          #
+          # The old 0.30 m floor let the middle band mark, and with it enough of the
+          # floor's noisy fringe that 31 % of the local costmap came back lethal while
+          # the robot stood between two tables: the controller could not find a way
+          # through a 2.5 m gap, the plan flipped between two detours (4.61 <-> 4.95 m)
+          # and the run stalled in recovery loops at 4.8 m from the goal.
+          #
+          # 0.55 m sits in the empty band between the two: no floor, no noise, every
+          # tabletop. Chair seats drop out with it, and that is fine - the LiDAR sees
+          # chair legs, and the evidence map's morphological closing turns them back
+          # into a solid chair.
+          min_obstacle_height: 0.55
+          max_obstacle_height: 1.20
+          obstacle_max_range: 3.0
+          # Anything the camera reports from inside 0.45 m is the robot's own body or
+          # near-field depth noise - the same threshold scan_filter.py applies to the
+          # LiDAR, for the same reason.
+          obstacle_min_range: 0.45
+          raytrace_max_range: 3.5
+          raytrace_min_range: 0.0
+      always_send_full_costmap: True
+
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 1.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_footprint
+      # Same reasoning as the local costmap: the true polygon, not a fat disc.
+      footprint: "[[0.24, 0.26], [0.24, -0.26], [-0.24, -0.26], [-0.24, 0.26]]"
+      # Matches the evidence map's resolution (see evidence_map.py). The static layer
+      # sizes this costmap from that map, so any other value here would be overridden
+      # anyway - and 0.10 over 34 x 34 m is 116k cells against 462k at 0.05, which is
+      # CPU this world does not have to spare (RTF 0.02).
+      resolution: 0.10
+      # Unexplored cells must read as FREE, not as NO_INFORMATION (255). NavFn treats
+      # 255 as lethal, so unknown space made the goal - which sits ~9.9 m ahead, in
+      # territory the LiDAR has never seen - look as if it were inside an obstacle;
+      # planning failed outright ("Failed to create plan") and the robot never moved.
+      # The evidence map also publishes unexplored cells as free, so this holds
+      # whichever layer gets there first.
+      track_unknown_space: false
+      # NOT a rolling window any more, and that is a direct consequence of `map` being
+      # the Gazebo world frame (see world_anchor.py): one fixed 34 x 34 m costmap now
+      # covers the whole restaurant, the goal included, so it cannot fall outside its
+      # bounds - the failure that used to abort the behaviour tree in 45 ms, too fast
+      # to look like anything but a configuration error. A fixed costmap also means
+      # obstacle knowledge is never lost by scrolling out of the window.
+      rolling_window: false
+      # static_layer FIRST (it overwrites what it covers), then the LiDAR obstacle
+      # layer, then inflation.
+      #
+      # Running Nav2's obstacle layer beside our evidence map is a genuine redundancy -
+      # two memories of one sensor - and the crude one never forgets: this costmap is
+      # fixed (see rolling_window), so anything it ever marked stays marked unless a ray
+      # passes through it again. Measured while a run was stalled: of 14757 lethal cells
+      # here, 10889 (74 %) matched an obstacle in the evidence map and 3828 (26 %)
+      # matched nothing at all - the goal cell among them, which is exactly why "Failed
+      # to create plan" appeared while the robot stood in free space 4.6 m away.
+      #
+      # Removing the layer was tried, and made things worse, which is why it is still
+      # here: the evidence map publishes at 1 Hz, and as the *only* global obstacle
+      # source that lag let a plan cut a corner the robot could not take - the run that
+      # followed produced this solution's first contact, against
+      # `cafe_table_1::link::surface`, and stalled earlier than before. The redundancy
+      # costs stale cells; removing it costs collisions. Keep it, and keep the evidence
+      # map as the layer that decides what the world looks like.
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        # Our own perception layer, injected through the interface Nav2 already has for
+        # a map: a nav_msgs/OccupancyGrid topic. evidence_map.py publishes a log-odds
+        # LiDAR grid of the restaurant in the world frame, with the gaps between chair
+        # legs closed so that a chair reads as one object rather than four dots the
+        # planner will route between. That is world-frame obstacle memory, which the
+        # sensor-range-limited obstacle layers cannot provide, and it needs no C++
+        # costmap plugin.
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /parc/evidence_map
+        # The map is latched (transient local), so the layer gets the current one the
+        # moment it subscribes instead of waiting for the next publication.
+        map_subscribe_transient_local: True
+        subscribe_to_updates: False
+        # Not trinary: the map distinguishes "measured obstacle" (100, lethal) from
+        # "gap closed between the legs of one object" (60, expensive but passable). A
+        # trinary map would collapse the two and could wall off a real doorway.
+        trinary_costmap: False
+        lethal_cost_threshold: 100
+      obstacle_layer:
+        # VoxelLayer, not ObstacleLayer, and that distinction is load-bearing.
+        #
+        # ObstacleLayer is a flat grid: every sensor marks and clears the same 2D
+        # cell regardless of height. The camera would mark a tabletop cell, then
+        # the LiDAR - which at 4 cm passes *underneath* the table - would raytrace
+        # straight through that same cell and clear it. The obstacle flickered on
+        # and off, the global plan flipped between routes every cycle (path length
+        # swinging 12 m <-> 35 m), and the robot drove in circles near the spawn.
+        #
+        # VoxelLayer keeps a 3D grid, so a ray at z=0.04 clears only the low voxel
+        # and leaves the 0.755 m tabletop voxel marked. The local costmap already
+        # used VoxelLayer, which is why the conflict only showed up globally.
+        plugin: "nav2_costmap_2d::VoxelLayer"
+        enabled: True
+        publish_voxel_map: True
+        # Same reason as the local costmap: never let a sensor mark the robot itself.
+        footprint_clearing_enabled: True
+        origin_z: 0.0
+        z_resolution: 0.1
+        z_voxels: 16
+        mark_threshold: 0
+        # LiDAR ONLY in the global costmap, and this was measured the hard way.
+        #
+        # With the depth camera also marking here, the global costmap grew a solid
+        # barrier 5 m wide, 1 m in front of the robot - x from -2.6 to +2.4 at
+        # y = -5.7 - where the LiDAR evidence map, same instant and same frame, showed
+        # nothing but two table pedestals. The planner was sealed in: "Failed to create
+        # plan with tolerance of: 0.500000" from every pose, the behaviour tree fell
+        # into spin/wait recoveries, and the robot turned on the spot for 150 s having
+        # travelled 1.1 m.
+        #
+        # The camera's marks were survivable while this costmap was a rolling window:
+        # anything wrong scrolled out of it within a few metres. It is now a fixed map
+        # of the whole restaurant (see rolling_window above), so a spurious mark is
+        # permanent unless a ray happens to clear it - and a narrow field of view
+        # rarely revisits what it marked while turning.
+        #
+        # Tabletops are not lost. The camera still marks them in the LOCAL costmap,
+        # which is rolling and rebuilt from live data, so the controller still refuses
+        # to drive the 0.69 m chassis into a 0.755 m tabletop. Globally the LiDAR sees
+        # each table's pedestal, and the 0.60 m inflation around a ~0.21 m pedestal
+        # already covers the 0.45 m overhang of the top.
+        observation_sources: scan
+        scan:
+          topic: /scan_filtered
+          max_obstacle_height: 2.0
+          # Clearing stays ON, and the VoxelLayer is what makes that safe: a ray at
+          # the LiDAR's 4 cm height clears only the bottom voxel, leaving a 0.755 m
+          # tabletop voxel marked.
+          #
+          # The churn originally blamed on this (3000-4000 cells flipping per cycle)
+          # actually came from the behaviour tree wiping the whole costmap on every
+          # recovery - see behavior_trees/. With clearing disabled entirely the map
+          # never forgot anything instead: blocking cells climbed monotonically past
+          # 76000 of 360000 and the robot walled itself in behind its own marks.
+          clearing: True
+          marking: True
+          data_type: "LaserScan"
+          raytrace_max_range: 12.0
+          raytrace_min_range: 0.0
+          obstacle_max_range: 11.0
+          obstacle_min_range: 0.0
+        # (No pointcloud source here on purpose - see observation_sources above.
+        # The depth camera marks in the local costmap only.)
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        # Wider, gentler halo. Inflation does not block planning (only the 0.24 m
+        # inscribed radius does), it just makes passing close expensive - which is
+        # what we want around tables the robot tips over on contact with.
+        cost_scaling_factor: 2.0
+        inflation_radius: 0.60
+      always_send_full_costmap: True
+
+# The yaml_filename does not need to be specified since it going to be set by defaults in launch.
+# If you'd rather set it in the yaml, remove the default "map" value in the tb3_simulation_launch.py
+# file & provide full path to map below. If CLI map configuration or launch default is provided, that will be used.
+# map_server:
+#   ros__parameters:
+#     yaml_filename: ""
+
+map_saver:
+  ros__parameters:
+    save_map_timeout: 5.0
+    free_thresh_default: 0.25
+    occupied_thresh_default: 0.65
+    map_subscribe_transient_local: True
+
+planner_server:
+  ros__parameters:
+    expected_planner_frequency: 20.0
+    planner_plugins: ["GridBased"]
+    costmap_update_timeout: 1.0
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true
+
+smoother_server:
+  ros__parameters:
+    smoother_plugins: ["simple_smoother"]
+    simple_smoother:
+      plugin: "nav2_smoother::SimpleSmoother"
+      tolerance: 1.0e-10
+      max_its: 1000
+      do_refinement: True
+
+behavior_server:
+  ros__parameters:
+    local_costmap_topic: local_costmap/costmap_raw
+    global_costmap_topic: global_costmap/costmap_raw
+    local_footprint_topic: local_costmap/published_footprint
+    global_footprint_topic: global_costmap/published_footprint
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    drive_on_heading:
+      plugin: "nav2_behaviors::DriveOnHeading"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+    assisted_teleop:
+      plugin: "nav2_behaviors::AssistedTeleop"
+    local_frame: odom
+    global_frame: map
+    robot_base_frame: base_footprint
+    transform_tolerance: 0.1
+    simulate_ahead_time: 2.0
+    max_rotational_vel: 1.0
+    min_rotational_vel: 0.4
+    rotational_acc_lim: 3.2
+
+waypoint_follower:
+  ros__parameters:
+    loop_rate: 20
+    stop_on_failure: false
+    action_server_result_timeout: 900.0
+    waypoint_task_executor_plugin: "wait_at_waypoint"
+    wait_at_waypoint:
+      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      enabled: True
+      waypoint_pause_duration: 200
+
+route_server:
+  ros__parameters:
+    # The graph_filepath does not need to be specified since it going to be set by defaults in launch.
+    # If you'd rather set it in the yaml, remove the default "graph" value in the launch file(s).
+    # file & provide full path to map below. If graph config or launch default is provided, it is used
+    # graph_filepath: $(find-pkg-share nav2_route)/graphs/aws_graph.geojson
+    boundary_radius_to_achieve_node: 1.0
+    radius_to_achieve_node: 2.0
+    smooth_corners: true
+    operations: ["AdjustSpeedLimit", "ReroutingService", "CollisionMonitor"]
+    ReroutingService:
+      plugin: "nav2_route::ReroutingService"
+    AdjustSpeedLimit:
+      plugin: "nav2_route::AdjustSpeedLimit"
+    CollisionMonitor:
+      plugin: "nav2_route::CollisionMonitor"
+      max_collision_dist: 3.0
+    edge_cost_functions: ["DistanceScorer", "CostmapScorer"]
+    DistanceScorer:
+      plugin: "nav2_route::DistanceScorer"
+    CostmapScorer:
+      plugin: "nav2_route::CostmapScorer"
+
+velocity_smoother:
+  ros__parameters:
+    smoothing_frequency: 20.0
+    scale_velocities: False
+    feedback: "OPEN_LOOP"
+    max_velocity: [0.5, 0.0, 2.0]
+    min_velocity: [-0.5, 0.0, -2.0]
+    max_accel: [2.5, 0.0, 3.2]
+    max_decel: [-2.5, 0.0, -3.2]
+    odom_topic: "odom"
+    odom_duration: 0.1
+    deadband_velocity: [0.0, 0.0, 0.0]
+    velocity_timeout: 1.0
+
+collision_monitor:
+  ros__parameters:
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    cmd_vel_in_topic: "cmd_vel_smoothed"
+    cmd_vel_out_topic: "cmd_vel"
+    state_topic: "collision_monitor_state"
+    transform_tolerance: 0.2
+    source_timeout: 1.0
+    base_shift_correction: True
+    stop_pub_timeout: 2.0
+    # Polygons represent zone around the robot for "stop", "slowdown" and "limit" action types,
+    # and robot footprint for "approach" action type.
+    polygons: ["FootprintApproach"]
+    FootprintApproach:
+      type: "polygon"
+      action_type: "approach"
+      footprint_topic: "/local_costmap/published_footprint"
+      time_before_collision: 1.2
+      simulation_time_step: 0.1
+      min_points: 6
+      visualize: False
+      enabled: True
+    observation_sources: ["scan"]
+    scan:
+      type: "scan"
+      # The collision monitor has its own scan source, separate from the costmaps.
+      # Pointed at the raw /scan it would see the robot's own chassis as a
+      # permanent imminent collision and brake forever.
+      topic: "/scan_filtered"
+      min_height: 0.15
+      max_height: 2.0
+      enabled: True
+
+docking_server:
+  ros__parameters:
+    controller_frequency: 50.0
+    initial_perception_timeout: 5.0
+    wait_charge_timeout: 5.0
+    dock_approach_timeout: 30.0
+    undock_linear_tolerance: 0.05
+    undock_angular_tolerance: 0.1
+    max_retries: 3
+    base_frame: "base_link"
+    fixed_frame: "odom"
+    dock_backwards: false
+    dock_prestaging_tolerance: 0.5
+
+    # Types of docks
+    dock_plugins: ['simple_charging_dock']
+    simple_charging_dock:
+      plugin: 'opennav_docking::SimpleChargingDock'
+      docking_threshold: 0.05
+      staging_x_offset: -0.7
+      use_external_detection_pose: true
+      use_battery_status: false # true
+      use_stall_detection: false # true
+
+      external_detection_timeout: 1.0
+      external_detection_translation_x: -0.18
+      external_detection_translation_y: 0.0
+      external_detection_rotation_roll: -1.57
+      external_detection_rotation_pitch: -1.57
+      external_detection_rotation_yaw: 0.0
+      filter_coef: 0.1
+
+    # Dock instances
+    # The following example illustrates configuring dock instances.
+    # docks: ['home_dock']  # Input your docks here
+    # home_dock:
+    #   type: 'simple_charging_dock'
+    #   frame: map
+    #   pose: [0.0, 0.0, 0.0]
+
+    controller:
+      k_phi: 3.0
+      k_delta: 2.0
+      v_linear_min: 0.15
+      v_linear_max: 0.15
+      use_collision_detection: true
+      costmap_topic: "local_costmap/costmap_raw"
+      footprint_topic: "local_costmap/published_footprint"
+      transform_tolerance: 0.1
+      projection_time: 5.0
+      simulation_step: 0.1
+      dock_collision_threshold: 0.3
+
+loopback_simulator:
+  ros__parameters:
+    base_frame_id: "base_footprint"
+    odom_frame_id: "odom"
+    map_frame_id: "map"
+    scan_frame_id: "base_scan"  # tb4_loopback_simulator.launch.py remaps to 'rplidar_link'
+    update_duration: 0.02
+    scan_range_min: 0.05
+    scan_range_max: 30.0
+    scan_angle_min: -3.1415
+    scan_angle_max: 3.1415
+    scan_angle_increment: 0.02617
+    scan_use_inf: true

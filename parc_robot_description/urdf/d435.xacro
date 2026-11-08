@@ -105,7 +105,7 @@
       <sensor type="camera" name="${name}_color">
         <always_on>true</always_on>
         <visualize>false</visualize>
-        <update_rate>30.0</update_rate>
+        <update_rate>2.0</update_rate>
         <topic>${name}_color/image_raw</topic>
         <gz_frame_id>${name}_color_optical_frame</gz_frame_id>
         <camera name="${name}_color">
@@ -134,7 +134,7 @@
       <sensor type="rgbd_camera" name="${name}_depth">
         <always_on>true</always_on>
         <visualize>false</visualize>
-        <update_rate>15.0</update_rate>
+        <update_rate>6.0</update_rate>
         <topic>${name}_depth</topic>
         <gz_frame_id>${name}_depth</gz_frame_id>
         <camera name="${name}_depth">
